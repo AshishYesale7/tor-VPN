@@ -1,101 +1,48 @@
 #!/bin/bash
 
-PIDFILE="/tmp/tor_ip_changer.pid"
+# Array of DNS servers you want to cycle through
+DNS_SERVERS=("8.8.8.8" "1.1.1.1" "9.9.9.9")
 
-# Function to display the table header
-display_header() {
-    printf "%-20s | %-20s | %-20s\n" "Timestamp" "TOR Status" "Current IP"
-    printf "%s\n" "----------------------------------------------------------"
+# Get the primary network interface
+INTERFACE=$(networksetup -listallnetworkservices | sed -n '2p')
+
+# Function to change DNS server
+change_dns() {
+    local dns=$1
+    echo "Changing DNS to $dns"
+    sudo networksetup -setdnsservers "$INTERFACE" $dns
 }
 
-# Function to display the table row with data
-display_row() {
-    printf "%-20s | %-20s | %-20s\n" "$1" "$2" "$3"
+# Function to get the current IP address from Tor
+get_tor_ip() {
+    curl --socks5-hostname 127.0.0.1:9050 -s https://check.torproject.org/ | grep -oP '(?<=Your IP address appears to be )[0-9\.]+'
 }
 
-# Function to change TOR IP and display status
+# Function to change the TOR IP
 change_tor_ip() {
-    timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-    echo "$timestamp - Changing TOR IP..."
-
-    # Send signal to TOR to change IP
-    echo "SIGNAL NEWNYM" | nc 127.0.0.1 9051
+    echo "Changing TOR IP..."
+    sudo killall -HUP tor
     sleep 10
-
-    # Check if TOR is running by making a request through the TOR SOCKS5 proxy
-    tor_status=$(curl -sS --socks5 127.0.0.1:9050 https://check.torproject.org/ | grep -o "Congratulations. This browser is configured to use Tor.")
-
-    if [[ -n $tor_status ]]; then
-        tor_status="TOR is running"
-    else
-        tor_status="TOR is not running"
-    fi
-
-    # Get current IP
-    tor_ip=$(curl -sS https://ipinfo.io/ip)
-
-    # Display the data in tabular format
-    display_row "$timestamp" "$tor_status" "$tor_ip"
 }
 
-start() {
-    if [[ -f $PIDFILE ]]; then
-        echo "Script is already running."
-        exit 1
-    fi
-
-    echo "Starting TOR IP changer..."
-    display_header
-    (
-        while true; do
-            change_tor_ip
-            sleep 10
-        done
-    ) &
-    echo $! > $PIDFILE
-    echo "TOR IP changer started with PID $(cat $PIDFILE)."
+# Function to log the current status
+log_status() {
+    local status=$1
+    local dns=$2
+    local tor_ip=$(get_tor_ip)
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    printf "%-20s | %-20s | %-15s\n" "$timestamp" "$status" "$dns" "$tor_ip"
 }
 
-stop() {
-    if [[ -f $PIDFILE ]]; then
-        PID=$(cat $PIDFILE)
-        echo "Stopping TOR IP changer with PID $PID..."
-        kill $PID
-        rm -f $PIDFILE
-        echo "TOR IP changer stopped."
-    else
-        echo "No running instance found."
-        exit 1
-    fi
-}
+# Print the header of the log table
+printf "%-20s | %-20s | %-15s | %-15s\n" "Timestamp" "Status" "DNS Server" "TOR IP"
 
-status() {
-    if [[ -f $PIDFILE ]]; then
-        PID=$(cat $PIDFILE)
-        if ps -p $PID > /dev/null; then
-            echo "TOR IP changer is running with PID $PID."
-        else
-            echo "PID file found but no running instance. Cleaning up..."
-            rm -f $PIDFILE
-            exit 1
-        fi
-    else
-        echo "TOR IP changer is not running."
-    fi
-}
-
-case $1 in
-    start)
-        start
-        ;;
-    stop)
-        stop
-        ;;
-    status)
-        status
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|status}"
-        exit 1
-        ;;
-esac
+# Main loop to change DNS and TOR IP
+while true; do
+    for dns in "${DNS_SERVERS[@]}"; do
+        change_dns $dns
+        change_tor_ip
+        log_status "TOR IP Changed" $dns
+        sleep 60 # Wait for 60 seconds before changing again
+    done
+done
